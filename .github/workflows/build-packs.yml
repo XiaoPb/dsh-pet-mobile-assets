@@ -54,6 +54,23 @@ jobs:
           echo "webm 数量: $(ls "$PET_SRC/assets/webm" | wc -l)"
           du -sh "$PET_SRC/assets/webm"
 
+      - name: Ensure ffmpeg supports libwebp
+        # ubuntu 镜像自带的 ffmpeg 通常已启用 libwebp，但不同 runner 版本不保证；
+        # 缺失时先回落到 apt 包，再回落到静态构建，避免耗时的转码跑到一半才炸。
+        run: |
+          set -euo pipefail
+          has_libwebp() { command -v ffmpeg >/dev/null 2>&1 && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q " libwebp"; }
+          if has_libwebp; then echo "OK: 系统 ffmpeg 可用"; exit 0; fi
+          echo "系统 ffmpeg 缺 libwebp，尝试 apt 安装…"
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          if has_libwebp; then echo "OK: apt ffmpeg 可用"; exit 0; fi
+          echo "回落到 johnvansickle 静态构建…"
+          curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffstatic.tar.xz
+          tar -xf ffstatic.tar.xz
+          echo "$(pwd)/$(tar -tf ffstatic.tar.xz | grep -m1 '^[^/]*/ffmpeg$' | xargs dirname)" >> "$GITHUB_PATH"
+          echo "STATIC_FFMPEG=$(pwd)/$(tar -tf ffstatic.tar.xz | grep -m1 '^[^/]*/ffmpeg$')" >> "$GITHUB_ENV"
+          ffmpeg -hide_banner -encoders | grep " libwebp" || { echo "ffmpeg 仍不支持 libwebp"; exit 1; }
+
       - name: Cache converted webp
         # 同一组 specs+quality+版本命中时直接复用，省掉最耗时的转码
         id: cache-webp
@@ -66,12 +83,17 @@ jobs:
         if: steps.cache-webp.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          FF="${STATIC_FFMPEG:-ffmpeg}"
+          # 静态包只有 ffmpeg，没有 ffprobe；系统 ffprobe 始终存在且够用
+          PROBE="$(command -v ffprobe || true)"
           python tools/build-webp.py \
             --src "$PET_SRC" \
             --out build \
             --specs "${{ inputs.specs || '300x15,480x24,640x24' }}" \
             --quality "${{ inputs.quality || '60' }}" \
-            --jobs 4
+            --jobs 4 \
+            --ffmpeg "$FF" \
+            ${PROBE:+--ffprobe "$PROBE"}
 
       - name: Zip packs & build index
         run: |
