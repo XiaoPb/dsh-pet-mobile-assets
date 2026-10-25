@@ -367,9 +367,10 @@ def main() -> int:
         manifest = {
             "version": 1,
             "id": pid,
-            "name": f"{args.pet_name} {width}p{fps}",
+            "name": f"{args.pet_name} {width}p",
             "source": "PC2005-cloud/dsh-pet (webm -> animated webp)",
-            "resolution": f"{width}p{fps}",
+            # 给 index/UI 看的规格串：App 设置页会拼在包名后面
+            "resolution": f"{width}x{height} @{fps}fps",
             "width": width,
             "height": height,
             "fps": fps,
