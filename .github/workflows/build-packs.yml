@@ -1,0 +1,119 @@
+name: Build & publish pet packs
+
+# 全流水线自包含：**仓库不入库任何二进制**。
+#   npm registry 拉 dsh-pet 发布包（内含 assets/webm，约 53MB）
+#     → ffmpeg 抠黑转动画 WebP（三档）
+#     → zip(store) 打包
+#     → index.json + 三个 zip 直传 Release（附件单文件上限 2GB，最大档约 0.5GB，无需分卷）
+#
+# 触发：push tag v*；或手动 workflow_dispatch（可改档位，不上传 Release）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      specs:
+        description: "输出档位，逗号分隔：<宽度>x<帧率>"
+        default: "300x15,480x24,640x24"
+      quality:
+        description: "webp 质量 0~100"
+        default: "60"
+      dry_run:
+        description: "只构建不上传 Release"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PET_SRC: dsh-pet-src
+      # 桌面版发布包版本：升级素材时改这里即可
+      PET_VERSION: 0.3.8
+    steps:
+      - name: Checkout asset repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch dsh-pet source assets from npm
+        # 发布包里含 assets/webm + assets/config.jsonc + fonts/memes/pic，
+        # 因此流水线不依赖任何其它仓库或私有凭据。
+        run: |
+          set -euo pipefail
+          mkdir -p "$PET_SRC"
+          curl -fsSL "https://registry.npmjs.org/dsh-pet/-/dsh-pet-${PET_VERSION}.tgz" -o pet-src.tgz
+          tar -xzf pet-src.tgz -C "$PET_SRC" --strip-components=1
+          test -d "$PET_SRC/assets/webm" || { echo "素材缺失：包里没有 assets/webm"; exit 1; }
+          echo "webm 数量: $(ls "$PET_SRC/assets/webm" | wc -l)"
+          du -sh "$PET_SRC/assets/webm"
+
+      - name: Cache converted webp
+        # 同一组 specs+quality+版本命中时直接复用，省掉最耗时的转码
+        id: cache-webp
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: webp-v${{ env.PET_VERSION }}-${{ inputs.specs || '300x15,480x24,640x24' }}-q${{ inputs.quality || '60' }}
+
+      - name: Build three specs
+        if: steps.cache-webp.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python tools/build-webp.py \
+            --src "$PET_SRC" \
+            --out build \
+            --specs "${{ inputs.specs || '300x15,480x24,640x24' }}" \
+            --quality "${{ inputs.quality || '60' }}" \
+            --jobs 4
+
+      - name: Zip packs & build index
+        run: |
+          set -euo pipefail
+          python tools/build-index.py --build-root build --out packs --index index.json
+          ls -lh packs
+          python -c "import json;d=json.load(open('index.json',encoding='utf-8'));assert len(d['packs'])>=1;print('packs:',[p['id'] for p in d['packs']])"
+
+      - name: Summarize sizes
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          rows = []
+          for p in json.load(open('index.json', encoding='utf-8'))['packs']:
+            mb = p['size'] / 1024 / 1024
+            rows.append(f"| {p['id']} | {p.get('width')}×{p.get('height')} @{p['fps']}fps | "
+                        f"{p['animations']} | {mb:.1f} MB |")
+          total = sum(p['size'] for p in json.load(open('index.json', encoding='utf-8'))['packs']) / 1024 / 1024
+          out = pathlib.Path('summary.md')
+          out.write_text(
+              "| 资源包 | 规格 | 动画数 | 体积 |\n|---|---|---|---|\n"
+              + "\n".join(rows) + f"\n\n合计 **{total:.1f} MB**（Release 单文件上限 2GB，未分卷）\n",
+              encoding='utf-8')
+          print(out.read_text(encoding='utf-8'))
+          PY
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/') && !inputs.dry_run
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            index.json
+            packs/*.zip
+          fail_on_unmatched_files: true
+
+      - name: Upload build artifacts (dry run / dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') || inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-packs
+          path: |
+            index.json
+            packs/*.zip
+          retention-days: 3

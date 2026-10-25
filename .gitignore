@@ -1,0 +1,9 @@
+# 转换产物：由 CI 从 dsh-pet 源素材生成，不入库
+webp/
+build/
+packs/
+.tmp*/
+index.json
+__pycache__/
+tools/__pycache__/
+*.tgz
