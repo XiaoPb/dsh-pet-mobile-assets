@@ -81,16 +81,10 @@ jobs:
           command -v ffmpeg
           has_libwebp || { echo "ffmpeg 仍不支持 libwebp"; exit 1; }
 
-      - name: Cache converted webp
-        # 同一组 specs+quality+版本命中时直接复用，省掉最耗时的转码
-        id: cache-webp
-        uses: actions/cache@v4
-        with:
-          path: build
-          key: webp-v${{ env.PET_VERSION }}-${{ inputs.specs || '300x15,480x24,640x24' }}-q${{ inputs.quality || '60' }}
-
       - name: Build three specs
-        if: steps.cache-webp.outputs.cache-hit != 'true'
+        # 不使用 actions/cache：三档产物合计约 1GB，会吃掉仓库 10GB 缓存配额的大头，
+        # 且同一 key 在两次运行并发时会出现 "Unable to reserve cache" 直接失败。
+        # 每次发版本来就是全新全量转码，命中率也低，收益不抵风险。
         run: |
           set -euo pipefail
           FF="${STATIC_FFMPEG:-ffmpeg}"
