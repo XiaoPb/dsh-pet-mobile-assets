@@ -99,7 +99,7 @@ jobs:
             --ffmpeg "$FF" \
             ${PROBE:+--ffprobe "$PROBE"}
 
-      - name: Guard: animated WebP alpha sanity
+      - name: Guard animated WebP alpha sanity
         # 回归防护：ffmpeg 的 yuva420p → libwebp 路径会把海量 alpha=0 错写成
         # alpha=1，Android 渲染成灰底框（Chrome 上看不出来）。转码必须走 bgra。
         # 这里抽检每档若干文件的中间帧，alpha==1 占比超过 5% 即判失败。
