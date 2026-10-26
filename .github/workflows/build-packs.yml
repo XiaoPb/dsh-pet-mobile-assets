@@ -104,7 +104,19 @@ jobs:
           set -euo pipefail
           python tools/build-index.py --build-root build --out packs --index index.json
           ls -lh packs
-          python -c "import json;d=json.load(open('index.json',encoding='utf-8'));assert len(d['packs'])>=1;print('packs:',[p['id'] for p in d['packs']])"
+          # 索引里的 url 必须是**裸附件名**：Release 附件平铺在同一层，
+          # 写成 "packs/x.zip" 会被 App 拼成 .../download/packs/x.zip 而 404。
+          python - <<'PY'
+          import json, pathlib, sys
+          d = json.load(open('index.json', encoding='utf-8'))
+          assert len(d['packs']) >= 1, '索引为空'
+          zips = {p.name for p in pathlib.Path('packs').glob('*.zip')}
+          for p in d['packs']:
+              u = p['url']
+              assert '/' not in u, f"{p['id']}: url 不能带目录前缀（{u}）"
+              assert u in zips, f"{p['id']}: url {u} 与产出 zip 不匹配 {sorted(zips)}"
+          print('url 校验通过:', [p['url'] for p in d['packs']])
+          PY
 
       - name: Summarize sizes
         run: |

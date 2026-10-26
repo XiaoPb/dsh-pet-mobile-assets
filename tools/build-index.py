@@ -68,7 +68,11 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path, help="zip 输出目录")
     ap.add_argument("--index", default="index.json", type=Path)
     ap.add_argument("--filter", default="", help="只处理这些包（逗号分隔的目录名）")
-    ap.add_argument("--release-tag", default="", help="写入 Release 地址前缀，留空则用相对路径")
+    ap.add_argument(
+        "--release-tag",
+        default="",
+        help="兼容旧参数，已忽略：索引统一写附件文件名（Release 附件平铺），由 App 按 index 基址拼接",
+    )
     args = ap.parse_args()
 
     build_root: Path = args.build_root
@@ -94,7 +98,9 @@ def main() -> int:
         animations = zip_dir(d, zip_path)
         size = zip_path.stat().st_size
         sha = sha256_of(zip_path)
-        url = f"{args.release_tag}/{zip_path.name}" if args.release_tag else f"packs/{zip_path.name}"
+        # Release 附件是平铺的（所有 zip 都在同一层），索引里只写文件名，
+        # 由 App 用 index.json 自身的基址拼接。写成 "packs/xxx.zip" 会 404。
+        url = zip_path.name
 
         entry = {
             "id": pid,

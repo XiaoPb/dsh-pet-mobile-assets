@@ -26,7 +26,7 @@ build/<pack-id>/                       # 每档一个自包含目录
   │                                    #   frames,durationMs,bytes,sha256} + assets{fonts,memes,pic}
   ├─ webp/a001.webp … a106.webp        # 动画 WebP（VP8X + alpha）
   └─ fonts/ memes/ pic/
-packs/<pack-id>.zip                    # Release 附件（单文件，不分卷）
+packs/<pack-id>.zip                    # CI 本地暂存目录（打好的 zip，随后上传 Release，不入库）
 index.json                             # App 拉取入口：包列表/规格/体积/sha256/下载地址
 ```
 
@@ -80,7 +80,8 @@ python tools/build-index.py --build-root build --out packs --index index.json
 ## App 侧约定
 
 - 下载地址：`https://github.com/XiaoPb/dsh-pet-mobile-assets/releases/latest/download/index.json`；
-- `index.json` 中 `url` 是相对路径（`packs/<id>.zip`），App 按 index 的目录基地址解析；
+- `index.json` 中 `url` 是**裸附件名**（`<id>.zip`）：Release 附件平铺在同一层，
+  App 按 index.json 自身所在目录拼接。带 `packs/` 之类的目录前缀会 404；
 - `parts` 恒为空数组 —— Release 单文件直传，App 侧用 HTTP Range 断点续传兜底大文件；
 - 包内必须含 `pet-config.json` 与 `webp/<slug>.webp`，可选 `fonts/`、`memes/`、`pic/`；
 - App（`PetPackInstaller`）只解这些内容，装到 `files/pet/packs/<id>/`，
