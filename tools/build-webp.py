@@ -187,10 +187,17 @@ def convert(
     ffmpeg: str, webm: Path, dest: Path,
     width: int, fps: int, quality: int, sim: str, blend: str,
 ) -> None:
-    """黑幕抠像 → 动画 WebP(alpha)。fps 用于抽帧降速：体积几乎与总帧数成正比。"""
+    """黑幕抠像 → 动画 WebP(alpha)。fps 用于抽帧降速：体积几乎与总帧数成正比。
+
+    **必须用 bgra 而不是 yuva420p 喂给 libwebp**：ffmpeg 的 YUVA 导入路径会把
+    alpha=0 的像素错写成 alpha=1（实测 300×169 画布约 80% 像素中招，无论
+    blend 是否为 0、是否 lossless 都会出现）。这些 alpha=1 的黑色像素在
+    Chrome/桌面上肉眼不可见，但 Android 的 AnimatedImageDrawable 合成时会
+    被放大成一块盖住整个画布的灰黑色底框。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     vf = KEY_FILTER.format(sim=sim, blend=blend)
-    vf += f",fps={fps},format=yuva420p,scale={width}:-1"
+    vf += f",fps={fps},format=bgra,scale={width}:-1:flags=bicubic"
     subprocess.run(
         [
             ffmpeg, "-y", "-v", "error", "-i", str(webm), "-vf", vf,

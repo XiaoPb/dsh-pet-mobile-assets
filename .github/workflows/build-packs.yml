@@ -99,6 +99,31 @@ jobs:
             --ffmpeg "$FF" \
             ${PROBE:+--ffprobe "$PROBE"}
 
+      - name: Guard: animated WebP alpha sanity
+        # 回归防护：ffmpeg 的 yuva420p → libwebp 路径会把海量 alpha=0 错写成
+        # alpha=1，Android 渲染成灰底框（Chrome 上看不出来）。转码必须走 bgra。
+        # 这里抽检每档若干文件的中间帧，alpha==1 占比超过 5% 即判失败。
+        run: |
+          set -euo pipefail
+          pip install --quiet pillow numpy
+          python - <<'PY'
+          import glob, io, random, sys
+          import numpy as np
+          from PIL import Image
+          random.seed(42)
+          files = sorted(glob.glob('build/*/webp/*.webp'))
+          assert files, 'build 下没有 webp 产物'
+          sample = random.sample(files, min(9, len(files)))
+          for f in sample:
+              im = Image.open(f)
+              im.seek(im.n_frames // 2)
+              a = np.asarray(im.convert('RGBA'))[:, :, 3]
+              frac = float((a == 1).mean())
+              print(f"{f}: alpha==1 占比 {frac:.4f}")
+              assert frac < 0.05, f"{f}: alpha==1 占比 {frac:.2%} ≥ 5%，疑似 yuva420p 路径回归"
+          print('alpha 体检通过:', len(sample), '个文件')
+          PY
+
       - name: Zip packs & build index
         run: |
           set -euo pipefail
