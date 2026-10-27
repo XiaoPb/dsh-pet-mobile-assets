@@ -75,15 +75,17 @@ def check_file(path: Path, visual: bool = True) -> tuple[bool, list[str]]:
     if not visual:
         return (not problems), problems
     # 判据 2：拖影（PIL 逐帧解码，慢，CI 里按抽样跑）
-    if Image is not None:
-        from check_webp_ghost import THRESHOLD_RATIO, check as ghost_check
+    try:
+        from check_webp_ghost import check as ghost_check
+    except ImportError as e:  # 缺 Pillow 时不让整个门禁崩掉，降级为跳过
+        print(f"    拖影检查跳过（{e}）")
+        ghost_check = None
+    if ghost_check is not None:
         ok, msg = ghost_check(path)
         if not ok:
             problems.append(f"判据2 FAIL: 拖影 {msg}")
         else:
             print(f"    拖影 {msg}")
-    else:
-        print("    拖影检查跳过（无 Pillow）")
     # 判据 3：alpha
     ok, msg = alpha_check(path)
     if not ok:
