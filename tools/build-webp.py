@@ -33,6 +33,7 @@ import hashlib
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -46,8 +47,10 @@ if hasattr(sys.stdout, "reconfigure"):
 PET_REF_WIDTH = 462
 HIT_BOX = {"x0": 200, "y0": 50, "x1": 440, "y1": 335}  # 640×360 坐标系里的身体矩形
 
-# 抠像参数：素材是**纯黑底**，similarity/blend 收紧到只吃纯黑，
-# 避免误伤角色里的深色细节（实测：与黑底互斥的内部黑像素约 295/230400，肉眼不可见）
+# 抠像参数：素材是**纯黑底**，similarity 收紧到只吃纯黑，
+# 避免误伤角色里的深色细节（实测：与黑底互斥的内部黑像素约 295/230400，肉眼不可见）。
+# blend 控制边缘 alpha 渐变带宽度：0.02 时近乎二值硬边（锯齿严重，2026-10-27 实测），
+# 0.10 配合 lanczos 缩放边缘最平滑；0.14 起边际收益趋零还可能让细发丝半透明。
 KEY_FILTER = "colorkey=0x000000:{sim}:{blend}"
 
 # 静态资源目录：每档各复制一份，保证 zip 自包含
@@ -186,6 +189,7 @@ def probe(ffprobe: str, path: Path) -> dict:
 def convert(
     ffmpeg: str, webm: Path, dest: Path,
     width: int, fps: int, quality: int, sim: str, blend: str,
+    scale_flags: str = "lanczos",
 ) -> None:
     """黑幕抠像 → 动画 WebP(alpha)。fps 用于抽帧降速：体积几乎与总帧数成正比。
 
@@ -194,19 +198,98 @@ def convert(
     blend 是否为 0、是否 lossless 都会出现）。这些 alpha=1 的黑色像素在
     Chrome/桌面上肉眼不可见，但 Android 的 AnimatedImageDrawable 合成时会
     被放大成一块盖住整个画布的灰黑色底框。
+
+    缩放用 lanczos + colorkey blend≥0.08：300p 是 2 倍级降采样，bicubic 硬边
+    会保留 colorkey 的锯齿台阶（2026-10-27 六倍放大实测，lanczos+blend.10 最平滑）。
+    编码用 good/cpu-used 2：realtime 档纹理损耗明显，四段动画全量重编也就慢几十秒。
+
+    编码完再跑两道容器 patch（毫秒级、幂等）：
+      1. [patch_noblend]  帧标志 BLEND → NO_BLEND，消除逐帧叠加导致的拖影
+         （libwebp 的 WebPAnimEncoder 给每帧写「BLEND + 不清回背景 + 整画布
+         矩形」，而每一帧自己又是**完整画面**，叠加就是拖影）
+      2. [patch_bgcolor]  ANIM 背景色不透明白 → 全透明，防 dispose=TO_BG 闪白框
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     vf = KEY_FILTER.format(sim=sim, blend=blend)
-    vf += f",fps={fps},format=bgra,scale={width}:-1:flags=bicubic"
+    vf += f",fps={fps},format=bgra,scale={width}:-1:flags={scale_flags}"
     subprocess.run(
         [
             ffmpeg, "-y", "-v", "error", "-i", str(webm), "-vf", vf,
             "-c:v", "libwebp", "-loop", "0",
-            "-cpu-used", "5", "-deadline", "realtime", "-compression_level", "0",
+            "-cpu-used", "2", "-deadline", "good", "-compression_level", "4",
             "-q:v", str(quality), str(dest),
         ],
         check=True,
     )
+    patched = patch_noblend(dest)
+    if patch_bgcolor(dest):
+        patched += 1
+    if patched:
+        print(f"    {dest.name}: 容器 patch ×{patched}")
+
+
+def patch_noblend(path: Path) -> int:
+    """把每帧的 ANMF 标志从 BLEND 改成 NO_BLEND（覆盖而非叠在上一帧上）。
+
+    只对「帧矩形 == 整张画布」的帧安全；遇到子矩形帧（说明编码器做了增量
+    优化、依赖上一帧）就原样保留并交回计数，由调用方决定是否告警。
+    返回改写的帧数。
+    """
+    data = bytearray(path.read_bytes())
+    if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return 0
+    canvas = None
+    off = 12
+    changed = 0
+    while off + 8 <= len(data):
+        fourcc = bytes(data[off:off + 4])
+        size = struct.unpack("<I", bytes(data[off + 4:off + 8]))[0]
+        body = off + 8
+        if fourcc == b"VP8X":
+            canvas = (u24(data[body + 4:body + 7]) + 1, u24(data[body + 7:body + 10]) + 1)
+        elif fourcc == b"ANMF":
+            flags_at = body + 15
+            flags = data[flags_at]
+            full = canvas is not None and (
+                u24(data[body:body + 3]) == 0 and u24(data[body + 3:body + 6]) == 0
+                and u24(data[body + 6:body + 9]) + 1 == canvas[0]
+                and u24(data[body + 9:body + 12]) + 1 == canvas[1]
+            )
+            if full and not flags & 0x02:
+                data[flags_at] = flags | 0x02
+                changed += 1
+        off += 8 + size + (size & 1)
+    if changed:
+        path.write_bytes(data)
+    return changed
+
+
+def u24(b: bytes) -> int:
+    return b[0] | (b[1] << 8) | (b[2] << 16)
+
+
+def patch_bgcolor(path: Path) -> bool:
+    """把 ANIM 背景色从不透明白（#FFFFFFFF）改成全透明（#00000000）。
+
+    dispose=NONE 时背景色无害，但一旦有人把 dispose 改成 TO_BG 就会闪白框；
+    预先改成透明零风险。返回是否修改。
+    """
+    data = bytearray(path.read_bytes())
+    if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return False
+    off = 12
+    changed = False
+    while off + 8 <= len(data):
+        fourcc = bytes(data[off:off + 4])
+        size = struct.unpack("<I", data[off + 4:off + 8])[0]
+        body = off + 8
+        if fourcc == b"ANIM" and bytes(data[body:body + 4]) != b"\x00\x00\x00\x00":
+            data[body:body + 4] = b"\x00\x00\x00\x00"
+            changed = True
+        off += 8 + size + (size & 1)
+    if changed:
+        path.write_bytes(data)
+    return changed
 
 
 def sha256(path: Path) -> str:
@@ -243,11 +326,16 @@ def main() -> int:
     ap.add_argument("--ffprobe", default=None)
     ap.add_argument("--specs", default=DEFAULT_SPECS,
                     help="输出档位，逗号分隔：<宽度>x<帧率>，默认 " + DEFAULT_SPECS)
-    ap.add_argument("--quality", type=int, default=60, help="webp 质量 0~100")
+    ap.add_argument("--quality", type=int, default=70, help="webp 质量 0~100")
     ap.add_argument("--sim", default="0.06", help="colorkey similarity（0~1，越小越只吃纯黑）")
-    ap.add_argument("--blend", default="0.02", help="colorkey blend（边缘柔化）")
+    ap.add_argument("--blend", default="0.10",
+                    help="colorkey blend（边缘 alpha 渐变带宽度，0.02=硬边锯齿，0.10=平滑）")
+    ap.add_argument("--scale-flags", default="lanczos",
+                    help="缩放算法（降采样推荐 lanczos/area，bicubic 会保留锯齿）")
     ap.add_argument("--jobs", type=int, default=4, help="并行转换进程数")
     ap.add_argument("--only", type=int, default=0, help="只处理前 N 段（调试用）")
+    ap.add_argument("--names", default="",
+                    help="只处理指定动画（逗号分隔的动画名，保持配置顺序）；用于增量重编既有包")
     ap.add_argument("--pet-name", default="蓝色大肥鱼")
     args = ap.parse_args()
 
@@ -268,6 +356,12 @@ def main() -> int:
     if args.only:
         keep = all_names[: args.only]
         slugs = {n: slugs[n] for n in keep}
+    if args.names:
+        wanted = [n.strip() for n in args.names.split(",") if n.strip()]
+        missing = [n for n in wanted if n not in slugs]
+        if missing:
+            raise SystemExit(f"配置里没有这些动画: {missing}")
+        slugs = {n: slugs[n] for n in wanted}
     print(f"{len(slugs)}/{len(all_names)} 段动画，档位 {len(specs)} 个："
           f"{', '.join(f'{w}x{f}' for w, f in specs)}")
 
@@ -297,7 +391,8 @@ def main() -> int:
             list(ex.map(
                 lambda it: convert(args.ffmpeg, webm_dir / f"{it[0]}.webm",
                                    webp_out / f"{it[1]}.webp",
-                                   width, fps, args.quality, args.sim, args.blend),
+                                   width, fps, args.quality, args.sim, args.blend,
+                                   args.scale_flags),
                 jobs))
 
         total_bytes = 0
@@ -383,6 +478,8 @@ def main() -> int:
             "fps": fps,
             "refWidth": PET_REF_WIDTH,
             "hitBox": HIT_BOX,
+            # 自描述帧标志：本包已通过容器 patch 门禁（见 tools/check_pack.py）
+            "webpFlags": {"blend": False, "dispose": "none"},
             "animations": [{
                 "slug": slug,
                 "file": f"webp/{slug}.webp",

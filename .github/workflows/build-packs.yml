@@ -18,7 +18,7 @@ on:
         default: "300x15,480x24,640x24"
       quality:
         description: "webp 质量 0~100"
-        default: "60"
+        default: "70"
       dry_run:
         description: "只构建不上传 Release"
         type: boolean
@@ -94,7 +94,7 @@ jobs:
             --src "$PET_SRC" \
             --out build \
             --specs "${{ inputs.specs || '300x15,480x24,640x24' }}" \
-            --quality "${{ inputs.quality || '60' }}" \
+            --quality "${{ inputs.quality || '70' }}" \
             --jobs 4 \
             --ffmpeg "$FF" \
             ${PROBE:+--ffprobe "$PROBE"}
@@ -124,10 +124,35 @@ jobs:
           print('alpha 体检通过:', len(sample), '个文件')
           PY
 
+      - name: Release gate · 帧标志 / 拖影 / 背景色
+        # 防回退门禁（PET_ASSETS_NOBLEND.md §5）：任一判据不过即 fail，拦住发布。
+        #   1. 全部帧 NO_BLEND（blend=1 会逐帧叠加 → 越播越脏、身后黑雾）
+        #   2. 拖影 < 画布 0.5%（干净基线 0.15%，脏包 2.5%）
+        #   3. alpha==0 占比 > 50%（脏 alpha 兜底）
+        #   4. ANIM 背景色 alpha == 0（防 dispose=TO_BG 闪白框）
+        # 容器判据全量跑（纯字节解析），PIL 判据按 --sample 抽查，兼顾耗时。
+        run: |
+          set -euo pipefail
+          pip install --quiet pillow
+          for d in build/*/; do
+            echo "== $d"
+            python tools/check_pack.py "$d" --sample=8
+          done
+
       - name: Zip packs & build index
         run: |
           set -euo pipefail
-          python tools/build-index.py --build-root build --out packs --index index.json
+          # 包版本号：tag 的末段（v1.0.3 → 3），App 侧据此判断是否重下；
+          # 手动触发时退化为 run number，同样单调递增。
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            PACK_VERSION="${GITHUB_REF_NAME##*.}"
+          else
+            PACK_VERSION="${GITHUB_RUN_NUMBER}"
+          fi
+          if [[ ! "$PACK_VERSION" =~ ^[0-9]+$ ]]; then PACK_VERSION=0; fi
+          echo "pack version = $PACK_VERSION"
+          python tools/build-index.py --build-root build --out packs --index index.json \
+            --pack-version "$PACK_VERSION"
           ls -lh packs
           # 索引里的 url 必须是**裸附件名**：Release 附件平铺在同一层，
           # 写成 "packs/x.zip" 会被 App 拼成 .../download/packs/x.zip 而 404。

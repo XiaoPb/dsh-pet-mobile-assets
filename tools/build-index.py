@@ -69,6 +69,13 @@ def main() -> int:
     ap.add_argument("--index", default="index.json", type=Path)
     ap.add_argument("--filter", default="", help="只处理这些包（逗号分隔的目录名）")
     ap.add_argument(
+        "--pack-version",
+        type=int,
+        default=0,
+        help="写入每个包条目的 version（App 侧据此判断要不要重下；"
+             "建议取发布 tag 的递增段，如 v1.0.3 → 3）。0 = 不写该字段",
+    )
+    ap.add_argument(
         "--release-tag",
         default="",
         help="兼容旧参数，已忽略：索引统一写附件文件名（Release 附件平铺），由 App 按 index 基址拼接",
@@ -115,7 +122,13 @@ def main() -> int:
             "font": (manifest.get("assets", {}).get("fonts") or [None])[0],
             "url": url,
             "parts": [],  # Release 单文件直传，不做分卷
+            # 自描述帧标志（来自 manifest，见 build-webp.py）：blend=false 即已校帧，
+            # 方便不下载 zip 就能体检；App 侧也可据此提示异常包。
+            "webpFlags": manifest.get("webpFlags", {}),
         }
+        if args.pack_version:
+            # App 侧「检测到新 version 才下载」：不发版就不写，发了就递增。
+            entry["version"] = args.pack_version
         by_id[pid] = entry
         mb = size / 1024 / 1024
         over = "  ⚠ 超过 GitHub 2GB 附件上限" if size > GITHUB_LIMIT else ""

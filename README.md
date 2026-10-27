@@ -13,7 +13,11 @@ APK 里不带任何桌宠素材，需要桌宠的用户按需从本仓库 Releas
 tools/build-webp.py                    # webm → 动画 WebP + 每档生成 pet-config.json / manifest.json
 tools/build-index.py                   # build/<id>/ → zip(store) + index.json
 tools/estimate-size.py                 # 抽样转码估算各档全量体积（调档位时用）
-.github/workflows/build-packs.yml      # 拉源 → 三档转码 → 打包 → 上传 Release
+tools/inspect_webp_anim.py             # 体检：dump 每帧 rect/duration/blend/dispose + ANIM 背景色
+tools/fix-webp-blend.py                # 修容器：帧标志改 NO_BLEND + 背景色改全透明（默认只报告）
+tools/check_webp_ghost.py              # 量化拖影：原标志合成 vs 强制 NO_BLEND 合成的逐帧差异
+tools/check_pack.py                    # 发布门禁：blend / 拖影 / alpha / 背景色 四判据
+.github/workflows/build-packs.yml      # 拉源 → 三档转码 → 门禁 → 打包 → 上传 Release
 NOTICE.md                              # 素材许可说明
 ```
 
@@ -58,12 +62,24 @@ git tag v1.0.0 && git push origin v1.0.0
 
 ```bash
 ffmpeg -i 待机呼吸休闲.webm \
-  -vf "colorkey=0x000000:0.06:0.02,fps=15,format=yuva420p,scale=300:-1" \
-  -c:v libwebp -loop 0 -cpu-used 5 -deadline realtime -compression_level 0 -q:v 60 \
+  -vf "colorkey=0x000000:0.06:0.10,fps=15,format=bgra,scale=300:-1:flags=lanczos" \
+  -c:v libwebp -loop 0 -cpu-used 2 -deadline good -compression_level 4 -q:v 70 \
   build/dsh-pet-300p15/webp/a001.webp
+python tools/fix-webp-blend.py build/dsh-pet-300p15/webp --apply --bg   # 关键：容器后处理
 ```
 
-抠像质量：背景纯黑（仅约 0.13% 的内部黑像素可能被误抠，肉眼不可见），边缘干净、内部无破洞。
+三处参数都是踩过坑的，别随手改回去：
+
+| 参数 | 为什么 |
+| --- | --- |
+| `format=bgra`（不能是 yuva420p） | YUVA 导入路径会把 alpha=0 错写成 alpha=1（约 80% 画布），Android 合成时变成盖住角色的灰黑底框 |
+| `blend=0.10` + `flags=lanczos` | `blend=0.02` + `bicubic` 是近乎二值的硬边，300p 下降采样后锯齿非常明显；0.10 才有 alpha 渐变带（0.14 起收益趋零、细发丝反而发虚） |
+| `deadline good -cpu-used 2 -q:v 70` | realtime/cpu-used 5 的纹理损耗肉眼可见，四段全量重编也就几十秒 |
+
+容器后处理（`fix-webp-blend.py`）是**必须**的一步：libwebp 的 `WebPAnimEncoder` 给每帧写
+`BLEND + 不清回背景 + 整画布矩形`，而每帧本身是完整画面，播放器逐帧叠加 → **越播越脏、身后黑雾**。
+只改 ANMF 的一个标志字节即可修掉，不重编码、画质零损、幂等；同时把 ANIM 背景色从不透明白改成
+全透明，防止将来有人改 `dispose=TO_BG` 时闪白框。
 
 > 体积由**总帧数**主导，画质参数影响很小：降帧率几乎线性降体积，降 `-q:v` 收益有限。
 
@@ -83,6 +99,8 @@ python tools/build-index.py --build-root build --out packs --index index.json
 - `index.json` 中 `url` 是**裸附件名**（`<id>.zip`）：Release 附件平铺在同一层，
   App 按 index.json 自身所在目录拼接。带 `packs/` 之类的目录前缀会 404；
 - `parts` 恒为空数组 —— Release 单文件直传，App 侧用 HTTP Range 断点续传兜底大文件；
+- 每个包条目带 `version`（整数，取发布 tag 末段，如 v1.0.3 → 3）：**不递增的话，
+  已安装的设备不会重下**；同时带 `webpFlags: {blend: false, dispose: "none"}` 做自描述体检；
 - 包内必须含 `pet-config.json` 与 `webp/<slug>.webp`，可选 `fonts/`、`memes/`、`pic/`；
 - App（`PetPackInstaller`）只解这些内容，装到 `files/pet/packs/<id>/`，
   多个包可共存、设置页可切换删除。
